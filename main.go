@@ -11,14 +11,23 @@ type apiConfig struct {
 	mu             sync.RWMutex
 }
 
-// handleHits writes the number of fileserver hits to the response.
 func (cfg *apiConfig) handleHits(w http.ResponseWriter, r *http.Request) {
 	cfg.mu.Lock()
 	hits := cfg.fileserverHits
 	cfg.mu.Unlock()
 
-	// Write the hits count to the response
-	fmt.Fprintf(w, "Hits: %d", hits)
+	// Set the Content-Type header to indicate the response is HTML
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// Use fmt.Fprintf to send an HTML response with the dynamic hits value
+	fmt.Fprintf(w, `
+	<html>
+	<body>
+		<h1>Welcome, Chirpy Admin</h1>
+		<p>Chirpy has been visited %d times!</p>
+	</body>
+	</html>
+	`, hits)
 }
 
 // handleReset reset the number of fileserver hits to 0.
@@ -73,13 +82,13 @@ func main() {
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
 	// Handler for retrieving the number of hits
-	mux.HandleFunc("GET /metrics", apiCfg.handleHits)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.handleHits)
 
 	// Handler for reseting the number of hits to 0
-	mux.HandleFunc("/reset", apiCfg.handleReset)
+	mux.HandleFunc("/api/reset", apiCfg.handleReset)
 
 	// Define the health check endpoint
-	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.HandleFunc("GET /api/healthz", handleHealth)
 
 	// Wrap the mux with the CORS middleware
 	corsMux := middlewareCors(mux)
