@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -74,6 +77,48 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleValidateChirp(w http.ResponseWriter, r *http.Request) {
+	// Define a struct with an exported field to receive the JSON input
+	type input struct {
+		Body string `json:"body"`
+	}
+
+	var requestInput input
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&requestInput)
+	if err != nil {
+		log.Printf("Error decoding request body: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Error decoding request body"))
+		return
+	}
+
+	if len(requestInput.Body) > 140 {
+		w.WriteHeader(400)
+		w.Write([]byte("Chirp must be 140 characters long or less"))
+		return
+	}
+
+	targetWords := map[string]bool{
+		"kerfuffle": true,
+		"sharbert":  true,
+		"fornax":    true,
+	}
+
+	words := strings.Split(requestInput.Body, " ")
+
+	for i, word := range words {
+		if _, exist := targetWords[strings.ToLower(word)]; exist {
+			words[i] = "****"
+		}
+	}
+	responseBytes, _ := json.Marshal(map[string]string{"cleaned_body": strings.Join(words, " ")})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(responseBytes)
+}
+
 func main() {
 	apiCfg := &apiConfig{}
 	mux := http.NewServeMux()
@@ -87,8 +132,11 @@ func main() {
 	// Handler for reseting the number of hits to 0
 	mux.HandleFunc("/api/reset", apiCfg.handleReset)
 
-	// Define the health check endpoint
+	// Handler for check server's health
 	mux.HandleFunc("GET /api/healthz", handleHealth)
+
+	// Handler for validating the chirp's length
+	mux.HandleFunc("POST /api/validate_chirp", handleValidateChirp)
 
 	// Wrap the mux with the CORS middleware
 	corsMux := middlewareCors(mux)
