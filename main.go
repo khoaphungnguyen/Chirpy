@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
+	"strconv"
 	"sync"
+
+	"github.com/khoaphungnguyen/Chirpy/internal/storage"
 )
 
 type apiConfig struct {
@@ -77,73 +79,148 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleValidateChirp(w http.ResponseWriter, r *http.Request) {
-	// Define a struct with an exported field to receive the JSON input
-	type input struct {
-		Body string `json:"body"`
-	}
-
-	var requestInput input
-	decoder := json.NewDecoder(r.Body)
-	err := decoder.Decode(&requestInput)
-	if err != nil {
-		log.Printf("Error decoding request body: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("Error decoding request body"))
-		return
-	}
-
-	if len(requestInput.Body) > 140 {
-		w.WriteHeader(400)
-		w.Write([]byte("Chirp must be 140 characters long or less"))
-		return
-	}
-
-	targetWords := map[string]bool{
-		"kerfuffle": true,
-		"sharbert":  true,
-		"fornax":    true,
-	}
-
-	words := strings.Split(requestInput.Body, " ")
-
-	for i, word := range words {
-		if _, exist := targetWords[strings.ToLower(word)]; exist {
-			words[i] = "****"
+func handleChirps(db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		// Decode the request body into a Chirp struct
+		var newChirp storage.Chirp
+		if err := json.NewDecoder(r.Body).Decode(&newChirp); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
-	}
-	responseBytes, _ := json.Marshal(map[string]string{"cleaned_body": strings.Join(words, " ")})
 
+		// Validate chirp length
+		if len(newChirp.Body) > 140 {
+			http.Error(w, "Chirp must be 140 characters long or less", http.StatusBadRequest)
+			return
+		}
+
+		// Create a new chirp in the database
+		createdChirp, err := db.CreateChirp(newChirp.Body)
+		if err != nil {
+			http.Error(w, "Failed to create chirp", http.StatusInternalServerError)
+			return
+		}
+
+		// Respond with the created chirp
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(createdChirp)
+
+	case "GET":
+		// Retrieve all chirps from the database
+		chirps, err := db.GetChirps()
+		if err != nil {
+			http.Error(w, "Failed to retrieve chirps", http.StatusInternalServerError)
+			return
+		}
+
+		// Respond with all chirps
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(chirps)
+
+	default:
+		http.Error(w, "Only GET and POST methods are supported", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleChirp(db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+
+	// Convert the chirpID to int
+	id, err := strconv.Atoi(chirpID)
+	if err != nil {
+		http.Error(w, "Invalid chirp ID", http.StatusBadRequest)
+		return
+	}
+
+	chirp, err := db.GetSingleChirp(id)
+	if err != nil {
+		if err.Error() == "chirp not found" { // Check if the error is because the chirp was not found
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, "Failed to retrieve chirp", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Respond with all chirps
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
-	w.Write(responseBytes)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(chirp)
+
+}
+
+func handleUsers(db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		// Decode the request body into a Chirp struct
+		var newUser storage.User
+		if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Create a new chirp in the database
+		createdUser, err := db.CreateUser(newUser.Email)
+		if err != nil {
+			http.Error(w, "Failed to create a new user", http.StatusInternalServerError)
+			return
+		}
+
+		// Respond with the created chirp
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(createdUser)
+	default:
+		http.Error(w, "Onl POST methods are supported", http.StatusMethodNotAllowed)
+	}
 }
 
 func main() {
 	apiCfg := &apiConfig{}
+
+	// Initialize the DB
+	db, err := storage.NewDB("./db.json")
+	if err != nil {
+		log.Fatalf("Failed to initialize DB: %v", err)
+	}
+
 	mux := http.NewServeMux()
 
-	// Serve static files under the /app path
+	// Static files handler
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
-	// Handler for retrieving the number of hits
+	// Metrics handler
 	mux.HandleFunc("GET /admin/metrics", apiCfg.handleHits)
 
-	// Handler for reseting the number of hits to 0
-	mux.HandleFunc("/api/reset", apiCfg.handleReset)
+	// Reset hits handler
+	mux.HandleFunc("GET /api/reset", apiCfg.handleReset)
 
-	// Handler for check server's health
+	// Health check handler
 	mux.HandleFunc("GET /api/healthz", handleHealth)
 
-	// Handler for validating the chirp's length
-	mux.HandleFunc("POST /api/validate_chirp", handleValidateChirp)
+	// Chirps handler
+	mux.HandleFunc("/api/chirps", func(w http.ResponseWriter, r *http.Request) {
+		handleChirps(db, w, r)
+	})
+	//  Single Chirp handler
+	mux.HandleFunc("GET /api/chirps/{chirpID}", func(w http.ResponseWriter, r *http.Request) {
+		handleChirp(db, w, r)
+	})
 
-	// Wrap the mux with the CORS middleware
+	// Users handler
+	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+		handleUsers(db, w, r)
+	})
+
+	// CORS middleware
 	corsMux := middlewareCors(mux)
 
-	// Start the server with corsMux as the handler to apply the CORS middleware
-	err := http.ListenAndServe(":8080", corsMux)
-	if err != nil {
-		fmt.Printf("Error starting server: %s\n", err)
+	// Start the server
+	log.Println("Server starting on :8080...")
+	if err := http.ListenAndServe(":8080", corsMux); err != nil {
+		log.Printf("Error starting server: %s\n", err)
 	}
 }
