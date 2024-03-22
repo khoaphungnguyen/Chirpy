@@ -84,9 +84,15 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleChirps(db *storage.DB, w http.ResponseWriter, r *http.Request) {
+func handleChirps(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
+		userID, err := validateToken(r.Header.Get("Authorization"), secret)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+
 		// Decode the request body into a Chirp struct
 		var newChirp storage.Chirp
 		if err := json.NewDecoder(r.Body).Decode(&newChirp); err != nil {
@@ -101,9 +107,15 @@ func handleChirps(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Create a new chirp in the database
-		createdChirp, err := db.CreateChirp(newChirp.Body)
+		createdChirp, err := db.CreateChirp(userID, newChirp.Body)
 		if err != nil {
-			http.Error(w, "Failed to create chirp", http.StatusInternalServerError)
+			if err.Error() == "chirp not found" {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else if err.Error() == "unauthorized user" {
+				http.Error(w, "unauthorized user", http.StatusInternalServerError)
+			} else {
+				http.Error(w, "Failed to create chirp", http.StatusInternalServerError)
+			}
 			return
 		}
 
@@ -113,7 +125,6 @@ func handleChirps(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(createdChirp)
 
 	case "GET":
-		// Retrieve all chirps from the database
 		chirps, err := db.GetChirps()
 		if err != nil {
 			http.Error(w, "Failed to retrieve chirps", http.StatusInternalServerError)
@@ -126,35 +137,73 @@ func handleChirps(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(chirps)
 
 	default:
-		http.Error(w, "Only GET and POST methods are supported", http.StatusMethodNotAllowed)
+		http.Error(w, "Only GET, POST, and DELETE methods are supported", http.StatusMethodNotAllowed)
 	}
 }
 
-func handleChirp(db *storage.DB, w http.ResponseWriter, r *http.Request) {
-	chirpID := r.PathValue("chirpID")
-
-	// Convert the chirpID to int
-	id, err := strconv.Atoi(chirpID)
-	if err != nil {
-		http.Error(w, "Invalid chirp ID", http.StatusBadRequest)
-		return
-	}
-
-	chirp, err := db.GetSingleChirp(id)
-	if err != nil {
-		if err.Error() == "chirp not found" { // Check if the error is because the chirp was not found
-			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
-			http.Error(w, "Failed to retrieve chirp", http.StatusInternalServerError)
+func handleChirp(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		userID, err := validateToken(r.Header.Get("Authorization"), secret)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
 		}
-		return
+		chirpID := r.PathValue("chirpID")
+
+		// Convert the chirpID to int
+		id, err := strconv.Atoi(chirpID)
+		if err != nil {
+			http.Error(w, "Invalid chirp ID", http.StatusBadRequest)
+			return
+		}
+
+		chirp, err := db.GetSingleChirp(userID, id)
+		if err != nil {
+			if err.Error() == "chirp not found" { // Check if the error is because the chirp was not found
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else {
+				http.Error(w, "Failed to retrieve chirp", http.StatusInternalServerError)
+			}
+			return
+		}
+
+		// Respond with all chirps
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(chirp)
+
+	case "DELETE":
+		userID, err := validateToken(r.Header.Get("Authorization"), secret)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		chirpID := r.PathValue("chirpID")
+
+		// Convert the chirpID to int
+		id, err := strconv.Atoi(chirpID)
+		if err != nil {
+			http.Error(w, "Invalid chirp ID", http.StatusBadRequest)
+			return
+		}
+		//Retrieve all chirps from the database
+		_, err = db.DeleteChirp(userID, id)
+		if err != nil {
+			if err.Error() == "chirp not found" {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else if err.Error() == "unauthorized user" {
+				http.Error(w, "unauthorized user", http.StatusForbidden)
+			} else {
+				http.Error(w, "Failed to create chirp", http.StatusInternalServerError)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		http.Error(w, "Only GET and DELETE methods are supported", http.StatusMethodNotAllowed)
 	}
-
-	// Respond with all chirps
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(chirp)
-
 }
 
 func handleUsers(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
@@ -184,12 +233,9 @@ func handleUsers(secret string, db *storage.DB, w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(createdUser)
 	case "PUT":
-		authHeader := r.Header.Get("Authorization")
-		tokenString := strings.Split(authHeader, " ")
-
-		// Ensure the Authorization header is correctly formatted
-		if len(tokenString) != 2 || tokenString[0] != "Bearer" {
-			http.Error(w, "Malformed token", http.StatusBadRequest)
+		userID, err := validateToken(r.Header.Get("Authorization"), secret)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}
 
@@ -200,46 +246,7 @@ func handleUsers(secret string, db *storage.DB, w http.ResponseWriter, r *http.R
 			return
 		}
 
-		// Parse the token
-		token, err := jwt.ParseWithClaims(tokenString[1], &jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-
-			// Return the secret signing key
-			return []byte(secret), nil
-		})
-
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusUnauthorized)
-			return
-		}
-
-		claims, ok := token.Claims.(*jwt.MapClaims)
-		if !ok || !token.Valid {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		// Check if the issuer is correct for an access token
-		if iss, ok := (*claims)["iss"].(string); !ok || iss != "chirpy-access" {
-			http.Error(w, "Invalid access token", http.StatusUnauthorized)
-			return
-		}
-
-		userID, ok := (*claims)["sub"].(string)
-		if !ok {
-			http.Error(w, "UserID not found", http.StatusNotFound)
-			return
-		}
-
-		id, err := strconv.Atoi(userID)
-		if err != nil {
-			http.Error(w, "UserID conversion error", http.StatusBadRequest)
-			return
-		}
-
-		updatedUser, err := db.UpdateUser(id, newUser)
+		updatedUser, err := db.UpdateUser(userID, newUser)
 		if err != nil {
 			http.Error(w, "Could not update user", http.StatusInternalServerError)
 			return
@@ -263,6 +270,47 @@ func handleUsers(secret string, db *storage.DB, w http.ResponseWriter, r *http.R
 		http.Error(w, "Only POST and PUT methods are supported", http.StatusMethodNotAllowed)
 	}
 }
+
+// validateToken parses and validates a JWT token from the Authorization header.
+// It returns the userID from the token if the token is valid, otherwise an error.
+func validateToken(authHeader string, secret string) (int, error) {
+	tokenString := strings.Split(authHeader, " ")
+	if len(tokenString) != 2 || tokenString[0] != "Bearer" {
+		return 0, fmt.Errorf("malformed token")
+	}
+
+	token, err := jwt.ParseWithClaims(tokenString[1], &jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(secret), nil
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	if claims, ok := token.Claims.(*jwt.MapClaims); ok && token.Valid {
+		if iss, ok := (*claims)["iss"].(string); !ok || iss != "chirpy-access" {
+			return 0, fmt.Errorf("invalid access token")
+		}
+
+		userIDStr, ok := (*claims)["sub"].(string)
+		if !ok {
+			return 0, fmt.Errorf("user ID not found")
+		}
+
+		userID, err := strconv.Atoi(userIDStr)
+		if err != nil {
+			return 0, fmt.Errorf("user ID conversion error")
+		}
+
+		return userID, nil
+	}
+
+	return 0, fmt.Errorf("invalid token")
+}
+
 func handleRefresh(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
@@ -428,7 +476,7 @@ func handleLogin(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Create a new user in the database
-		user, err := db.Login(newUser.Email, newUser.Password)
+		user, err := db.LoginUser(newUser.Email, newUser.Password)
 		if err != nil {
 			if err.Error() == "user not found" {
 				http.Error(w, "Invalid user or password!", http.StatusNotFound)
@@ -480,11 +528,11 @@ func main() {
 
 	// Chirps handler
 	mux.HandleFunc("/api/chirps", func(w http.ResponseWriter, r *http.Request) {
-		handleChirps(db, w, r)
+		handleChirps(jwtSecret, db, w, r)
 	})
 	//  Single Chirp handler
-	mux.HandleFunc("GET /api/chirps/{chirpID}", func(w http.ResponseWriter, r *http.Request) {
-		handleChirp(db, w, r)
+	mux.HandleFunc("/api/chirps/{chirpID}", func(w http.ResponseWriter, r *http.Request) {
+		handleChirp(jwtSecret, db, w, r)
 	})
 
 	// Users handler

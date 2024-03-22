@@ -20,8 +20,9 @@ type DB struct {
 }
 
 type Chirp struct {
-	ID   int    `json:"id"`
-	Body string `json:"body"`
+	ID       int    `json:"id"`
+	AuthorID int    `json:"author_id"`
+	Body     string `json:"body"`
 }
 
 type User struct {
@@ -71,32 +72,6 @@ func NewDB(path string, secret string) (*DB, error) {
 	return db, nil
 }
 
-// CreateChirp creates a new chirp and saves it to disk.
-func (db *DB) CreateChirp(body string) (Chirp, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	dbStructure, err := db.loadDB()
-	if err != nil {
-		return Chirp{}, err
-	}
-
-	newID := len(dbStructure.Chirps) + 1 // Simplified ID generation
-
-	newChirp := Chirp{
-		ID:   newID,
-		Body: body,
-	}
-
-	dbStructure.Chirps[newID] = newChirp
-
-	if err := db.writeDB(dbStructure); err != nil {
-		return Chirp{}, err
-	}
-
-	return newChirp, nil
-}
-
 // CreateUser creates a new user and saves it to disk.
 func (db *DB) CreateUser(email, password string) (NewUserPayload, error) {
 	db.mu.Lock()
@@ -141,7 +116,7 @@ func (db *DB) CreateUser(email, password string) (NewUserPayload, error) {
 }
 
 // Login allows a user to login
-func (db *DB) Login(email, password string) (userResponsePayload, error) {
+func (db *DB) LoginUser(email, password string) (userResponsePayload, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -194,36 +169,6 @@ func (db *DB) Login(email, password string) (userResponsePayload, error) {
 	}
 
 	return payload, nil
-}
-
-// GetChirps returns all chirps in the database.
-func (db *DB) GetChirps() ([]Chirp, error) {
-	dbStructure, err := db.loadDB()
-	if err != nil {
-		return nil, err
-	}
-	chirps := make([]Chirp, 0, len(dbStructure.Chirps))
-
-	for _, chirp := range dbStructure.Chirps {
-		chirps = append(chirps, chirp)
-	}
-	return chirps, nil
-}
-
-// GetSingleChirp returns a single chirp from the database by ID.
-func (db *DB) GetSingleChirp(id int) (Chirp, error) {
-	dbStructure, err := db.loadDB()
-	if err != nil {
-		return Chirp{}, err
-	}
-
-	chirp, exists := dbStructure.Chirps[id]
-	if !exists {
-		// If the chirp does not exist, return an appropriate error
-		return Chirp{}, errors.New("chirp not found")
-	}
-
-	return chirp, nil
 }
 
 // GetUserByEmail returns a single user from the database by email.
@@ -296,6 +241,93 @@ func (db *DB) UpdateUser(id int, updatedUser User) (User, error) {
 	}
 
 	return user, nil
+}
+
+// CreateChirp creates a new chirp and saves it to disk.
+func (db *DB) CreateChirp(userID int, body string) (Chirp, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return Chirp{}, err
+	}
+
+	newID := len(dbStructure.Chirps) + 1 // Simplified ID generation
+
+	newChirp := Chirp{
+		ID:       newID,
+		AuthorID: userID,
+		Body:     body,
+	}
+
+	dbStructure.Chirps[newID] = newChirp
+
+	if err := db.writeDB(dbStructure); err != nil {
+		return Chirp{}, err
+	}
+
+	return newChirp, nil
+}
+
+// GetChirps returns all chirps in the database.
+func (db *DB) GetChirps() ([]Chirp, error) {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return nil, err
+	}
+	chirps := make([]Chirp, 0, len(dbStructure.Chirps))
+
+	for _, chirp := range dbStructure.Chirps {
+
+		chirps = append(chirps, chirp)
+
+	}
+	return chirps, nil
+}
+
+// GetSingleChirp returns a single chirp from the database by ID.
+func (db *DB) GetSingleChirp(userID, chirpID int) (Chirp, error) {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return Chirp{}, err
+	}
+
+	chirp, exists := dbStructure.Chirps[chirpID]
+	if !exists {
+		// If the chirp does not exist, return an appropriate error
+		return Chirp{}, errors.New("chirp not found")
+	}
+	if chirp.AuthorID != userID {
+		return Chirp{}, errors.New("unauthorized user")
+	}
+
+	return chirp, nil
+}
+
+// Delete a single chirp from the database by ID.
+func (db *DB) DeleteChirp(userID, chirpID int) (bool, error) {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return false, err
+	}
+
+	chirp, exists := dbStructure.Chirps[chirpID]
+	if !exists {
+		// If the chirp does not exist, return an appropriate error
+		return false, errors.New("chirp not found")
+	}
+	if chirp.AuthorID != userID {
+		return false, errors.New("unauthorized user")
+	}
+
+	delete(dbStructure.Chirps, chirpID)
+
+	if err := db.writeDB(dbStructure); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // RevokeRefreshToken marks a given refresh token as revoked.
