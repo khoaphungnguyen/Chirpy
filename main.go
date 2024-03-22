@@ -157,7 +157,7 @@ func handleChirp(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 
 }
 
-func handleUsers(db *storage.DB, w http.ResponseWriter, r *http.Request) {
+func handleUsers(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
 		// Decode the request body into a user struct
@@ -183,45 +183,6 @@ func handleUsers(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(createdUser)
-	default:
-		http.Error(w, "Onl POST methods are supported", http.StatusMethodNotAllowed)
-	}
-}
-
-type requestPayload struct {
-	Email           string `json:"email"`
-	Password        string `json:"password"`
-	ExpiresInSecond int    `json:"expireinsecond"`
-}
-
-func handleLogin(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case "POST":
-		// Decode the request body into a user struct
-		var newUser requestPayload
-		if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// Create a new user in the database
-		user, err := db.Login(newUser.Email, newUser.Password, time.Duration(newUser.ExpiresInSecond))
-		if err != nil {
-			if err.Error() == "user not found" {
-				http.Error(w, "Invalid user or password!", http.StatusNotFound)
-			} else if err.Error() == "invalid credentials" {
-				http.Error(w, "Invalid user or password!", http.StatusUnauthorized)
-			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
-
-			return
-		}
-
-		// Respond with the created chirp
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(user)
 	case "PUT":
 		authHeader := r.Header.Get("Authorization")
 		tokenString := strings.Split(authHeader, " ")
@@ -260,7 +221,13 @@ func handleLogin(secret string, db *storage.DB, w http.ResponseWriter, r *http.R
 			return
 		}
 
-		userID, ok := (*claims)["sub"].(string) // The subject field in JWT is typically "sub"
+		// Check if the issuer is correct for an access token
+		if iss, ok := (*claims)["iss"].(string); !ok || iss != "chirpy-access" {
+			http.Error(w, "Invalid access token", http.StatusUnauthorized)
+			return
+		}
+
+		userID, ok := (*claims)["sub"].(string)
 		if !ok {
 			http.Error(w, "UserID not found", http.StatusNotFound)
 			return
@@ -292,9 +259,194 @@ func handleLogin(secret string, db *storage.DB, w http.ResponseWriter, r *http.R
 		if err := json.NewEncoder(w).Encode(response); err != nil {
 			http.Error(w, "Error encoding response", http.StatusInternalServerError)
 		}
+	default:
+		http.Error(w, "Only POST and PUT methods are supported", http.StatusMethodNotAllowed)
+	}
+}
+func handleRefresh(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		authHeader := r.Header.Get("Authorization")
+		tokenString := strings.Split(authHeader, " ")
+
+		// Ensure the Authorization header is correctly formatted
+		if len(tokenString) != 2 || tokenString[0] != "Bearer" {
+			http.Error(w, "Malformed token", http.StatusBadRequest)
+			return
+		}
+
+		// Parse the token
+		token, err := jwt.ParseWithClaims(tokenString[1], &jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+
+			// Return the secret signing key
+			return []byte(secret), nil
+		})
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		claims, ok := token.Claims.(*jwt.MapClaims)
+		if !ok || !token.Valid {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Check if the issuer is correct for an access token
+		if iss, ok := (*claims)["iss"].(string); !ok || iss != "chirpy-refresh" {
+			http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+			return
+		}
+
+		userID, ok := (*claims)["sub"].(string)
+		if !ok {
+			http.Error(w, "UserID not found", http.StatusNotFound)
+			return
+		}
+
+		// Check if it's revoked
+		isRevoked, err := db.RefreshTokenIsRevoked(tokenString[1])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if isRevoked {
+			http.Error(w, "Attempt to use a revoked token", http.StatusUnauthorized)
+			return
+		}
+
+		// Create Token
+		accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+			Issuer:    "chirpy-access",
+			IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
+			ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(1 * time.Hour)),
+			Subject:   userID,
+		})
+
+		// Sign the JWT token and handle potential error
+		signedAccessToken, err := accessToken.SignedString([]byte(secret))
+		if err != nil {
+			http.Error(w, "Failed to signed the token", http.StatusInternalServerError)
+			return
+		}
+
+		// Preparing the response
+		response := struct {
+			Token string `json:"token"`
+		}{
+			Token: signedAccessToken,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			http.Error(w, "Error encoding response", http.StatusInternalServerError)
+		}
+	default:
+		http.Error(w, "Only POST methods are supported", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleRevoke(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		authHeader := r.Header.Get("Authorization")
+		tokenString := strings.Split(authHeader, " ")
+
+		// Ensure the Authorization header is correctly formatted
+		if len(tokenString) != 2 || tokenString[0] != "Bearer" {
+			http.Error(w, "Malformed token", http.StatusBadRequest)
+			return
+		}
+
+		// Parse the token
+		token, err := jwt.ParseWithClaims(tokenString[1], &jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+
+			// Return the secret signing key
+			return []byte(secret), nil
+		})
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		claims, ok := token.Claims.(*jwt.MapClaims)
+		if !ok || !token.Valid {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Check if the issuer is correct for an access token
+		if iss, ok := (*claims)["iss"].(string); !ok || iss != "chirpy-refresh" {
+			http.Error(w, "Invalid refresh token", http.StatusUnauthorized)
+			return
+		}
+
+		_, ok = (*claims)["sub"].(string)
+		if !ok {
+			http.Error(w, "UserID not found", http.StatusNotFound)
+			return
+		}
+		// marks a given refresh token as revoked
+
+		err = db.RevokeRefreshToken(tokenString[1])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 
 	default:
-		http.Error(w, "Onl POST, PUT methods are supported", http.StatusMethodNotAllowed)
+		http.Error(w, "Only POST methods are supported", http.StatusMethodNotAllowed)
+	}
+}
+
+type requestPayload struct {
+	Email           string `json:"email"`
+	Password        string `json:"password"`
+	ExpiresInSecond int    `json:"expires_in_seconds"`
+}
+
+func handleLogin(db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		// Decode the request body into a user struct
+		var newUser requestPayload
+		if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Create a new user in the database
+		user, err := db.Login(newUser.Email, newUser.Password)
+		if err != nil {
+			if err.Error() == "user not found" {
+				http.Error(w, "Invalid user or password!", http.StatusNotFound)
+			} else if err.Error() == "invalid credentials" {
+				http.Error(w, "Invalid user or password!", http.StatusUnauthorized)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+
+		// Respond with the user data
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(user)
+
+	default:
+		http.Error(w, "Only POST, PUT methods are supported", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -336,13 +488,23 @@ func main() {
 	})
 
 	// Users handler
-	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
-		handleUsers(db, w, r)
+	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+		handleUsers(jwtSecret, db, w, r)
 	})
 
 	// User Login Handler
-	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
-		handleLogin(jwtSecret, db, w, r)
+	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
+		handleLogin(db, w, r)
+	})
+
+	// Refresh token Handler
+	mux.HandleFunc("POST /api/refresh", func(w http.ResponseWriter, r *http.Request) {
+		handleRefresh(jwtSecret, db, w, r)
+	})
+
+	// Revoke token Handler
+	mux.HandleFunc("POST /api/revoke", func(w http.ResponseWriter, r *http.Request) {
+		handleRevoke(jwtSecret, db, w, r)
 	})
 
 	// CORS middleware

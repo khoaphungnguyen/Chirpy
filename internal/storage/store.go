@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"sync"
@@ -29,21 +30,38 @@ type User struct {
 	Password string `json:"password"`
 }
 
+type RefreshTokenInfo struct {
+	UserID    int
+	Token     string
+	Revoked   bool
+	ExpiresAt int64 // Unix timestamp
+}
+
 type DBStructure struct {
-	Chirps map[int]Chirp   `json:"chirps"`
-	Users  map[string]User `json:"users"`
+	Chirps        map[int]Chirp
+	Users         map[int]User
+	RefreshTokens map[string]RefreshTokenInfo
 }
 
 type userResponsePayload struct {
+	ID           int    `json:"id"`
+	Email        string `json:"email"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+type NewUserPayload struct {
 	ID    int    `json:"id"`
 	Email string `json:"email"`
-	Token string `json:"token"W`
 }
 
 // NewDB creates a new database connection
 // and initializes the database file if it doesn't exist.
 func NewDB(path string, secret string) (*DB, error) {
-	db := &DB{path: path, secret: secret}
+	db := &DB{
+		path:   path,
+		secret: secret,
+	}
 
 	// Ensure the database file exists; create it with initial content if it doesn't.
 	if err := db.ensureDB(); err != nil {
@@ -80,24 +98,26 @@ func (db *DB) CreateChirp(body string) (Chirp, error) {
 }
 
 // CreateUser creates a new user and saves it to disk.
-func (db *DB) CreateUser(email, password string) (userResponsePayload, error) {
+func (db *DB) CreateUser(email, password string) (NewUserPayload, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	_, err := db.GetSingleEmail(email)
-	if err == nil {
-		return userResponsePayload{}, errors.New("email exists")
-	}
-
 	dbStructure, err := db.loadDB()
 	if err != nil {
-		return userResponsePayload{}, err
+		return NewUserPayload{}, err
 	}
 
-	newID := len(dbStructure.Users) + 1 // Simplified ID generation
+	// Check for unique email
+	for _, user := range dbStructure.Users {
+		if user.Email == email {
+			return NewUserPayload{}, errors.New("email exists")
+		}
+	}
+
+	newID := len(dbStructure.Users) + 1 // Simplified ID generation, consider more robust ID generation
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return userResponsePayload{}, err
+		return NewUserPayload{}, err
 	}
 
 	newUser := User{
@@ -105,13 +125,14 @@ func (db *DB) CreateUser(email, password string) (userResponsePayload, error) {
 		Email:    email,
 		Password: string(hashedPassword),
 	}
-	dbStructure.Users[email] = newUser
+
+	dbStructure.Users[newID] = newUser
 
 	if err := db.writeDB(dbStructure); err != nil {
-		return userResponsePayload{}, err
+		return NewUserPayload{}, err
 	}
 
-	user := userResponsePayload{
+	user := NewUserPayload{
 		ID:    newUser.ID,
 		Email: newUser.Email,
 	}
@@ -120,11 +141,11 @@ func (db *DB) CreateUser(email, password string) (userResponsePayload, error) {
 }
 
 // Login allows a user to login
-func (db *DB) Login(email, password string, expiresIn time.Duration) (userResponsePayload, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+func (db *DB) Login(email, password string) (userResponsePayload, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
 
-	user, err := db.GetSingleEmail(email)
+	user, err := db.getUserByEmailNoLock(email)
 	if err != nil {
 		return userResponsePayload{}, err
 	}
@@ -135,23 +156,41 @@ func (db *DB) Login(email, password string, expiresIn time.Duration) (userRespon
 	}
 
 	// Create Token
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Issuer:    "chirpy",
+	accessToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    "chirpy-access",
 		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
-		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(expiresIn)),
+		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(1 * time.Hour)),
+		Subject:   strconv.Itoa(user.ID),
+	})
+	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		Issuer:    "chirpy-refresh",
+		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
+		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(24 * 60 * time.Hour)),
 		Subject:   strconv.Itoa(user.ID),
 	})
 
 	// Sign the JWT token and handle potential error
-	signedToken, err := token.SignedString([]byte(db.secret))
+	signedAccessToken, err := accessToken.SignedString([]byte(db.secret))
+	if err != nil {
+		return userResponsePayload{}, err
+	}
+	signedRefreshToken, err := refreshToken.SignedString([]byte(db.secret))
 	if err != nil {
 		return userResponsePayload{}, err
 	}
 
+	expiresAt := time.Now().UTC().Add(24 * time.Hour)
+
+	err = db.SaveRefreshTokenWithNoLock(user.ID, signedRefreshToken, expiresAt)
+	if err != nil {
+		fmt.Printf("Error saving refresh token: %v\n", err)
+	}
+
 	payload := userResponsePayload{
-		ID:    user.ID,
-		Email: user.Email,
-		Token: signedToken,
+		ID:           user.ID,
+		Email:        user.Email,
+		Token:        signedAccessToken,
+		RefreshToken: signedRefreshToken,
 	}
 
 	return payload, nil
@@ -187,20 +226,20 @@ func (db *DB) GetSingleChirp(id int) (Chirp, error) {
 	return chirp, nil
 }
 
-// GetSingleChirp returns a single chirp from the database by ID.
-func (db *DB) GetSingleEmail(email string) (User, error) {
+// GetUserByEmail returns a single user from the database by email.
+func (db *DB) getUserByEmailNoLock(email string) (User, error) {
 	dbStructure, err := db.loadDB()
 	if err != nil {
 		return User{}, err
 	}
 
-	user, exists := dbStructure.Users[email]
-	if !exists {
-		// If the chirp does not exist, return an appropriate error
-		return User{}, errors.New("user not found")
+	for _, user := range dbStructure.Users {
+		if user.Email == email {
+			return user, nil
+		}
 	}
 
-	return user, nil
+	return User{}, errors.New("user not found")
 }
 
 // GetUserByID returns a single user from the database by ID.
@@ -213,13 +252,12 @@ func (db *DB) GetUserByID(id int) (User, error) {
 		return User{}, err
 	}
 
-	for _, user := range dbStructure.Users {
-		if user.ID == id {
-			return user, nil
-		}
+	user, exists := dbStructure.Users[id]
+	if !exists {
+		return User{}, errors.New("user not found")
 	}
 
-	return User{}, errors.New("user not found")
+	return user, nil
 }
 
 // UpdateUser updates a user's information, excluding their email.
@@ -232,36 +270,109 @@ func (db *DB) UpdateUser(id int, updatedUser User) (User, error) {
 		return User{}, err
 	}
 
-	var userToUpdate *User
-	for _, user := range dbStructure.Users {
-		if user.ID == id {
-			userToUpdate = &user
-			break
-		}
-	}
-
-	if userToUpdate == nil {
+	user, exists := dbStructure.Users[id]
+	if !exists {
 		return User{}, errors.New("user not found")
 	}
 
+	// Assuming password can be updated, re-hash it
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(updatedUser.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return User{}, err
+	}
+	user.Password = string(hashedPassword)
+	// Update email if needed, ensure it's unique
+	for _, u := range dbStructure.Users {
+		if u.Email == updatedUser.Email && u.ID != id {
+			return User{}, errors.New("email is already in use by another user")
+		}
+	}
+	user.Email = updatedUser.Email
 
-	userToUpdate.Password = updatedUser.Password 
-	
-
-	dbStructure.Users[userToUpdate.Email] = *userToUpdate
+	dbStructure.Users[id] = user
 
 	if err := db.writeDB(dbStructure); err != nil {
 		return User{}, err
 	}
 
-	return *userToUpdate, nil
+	return user, nil
+}
+
+// RevokeRefreshToken marks a given refresh token as revoked.
+func (db *DB) RevokeRefreshToken(token string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+
+	// Check if the token exists
+	tokenInfo, exists := dbStructure.RefreshTokens[token]
+	if !exists {
+		return errors.New("token not found")
+	}
+
+	// Mark the token as revoked
+	tokenInfo.Revoked = true
+	dbStructure.RefreshTokens[token] = tokenInfo
+
+	if err := db.writeDB(dbStructure); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// SaveRefreshToken saves or updates a given refresh token in the database.
+func (db *DB) SaveRefreshTokenWithNoLock(userID int, token string, expiresAt time.Time) error {
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+
+	// Save or update the token information
+	dbStructure.RefreshTokens[token] = RefreshTokenInfo{
+		UserID:    userID,
+		Token:     token,
+		Revoked:   false, // Active token
+		ExpiresAt: expiresAt.Unix(),
+	}
+
+	// Persist the updated structure to the database
+	if err := db.writeDB(dbStructure); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// RefreshTokenIsRevoked checks if the given refresh token has been revoked.
+func (db *DB) RefreshTokenIsRevoked(token string) (bool, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return false, err // Error loading DB, can't determine token status
+	}
+
+	// Check if the token exists
+	tokenInfo, exists := dbStructure.RefreshTokens[token]
+	if !exists {
+		return false, errors.New("token not found") // Token not found; treat as revoked or handle appropriately
+	}
+
+	// Return the revoked status of the token
+	return tokenInfo.Revoked, nil
 }
 
 // ensureDB creates a new database file if it doesn't exist.
 func (db *DB) ensureDB() error {
 	if _, err := os.Stat(db.path); err != nil {
 		if os.IsNotExist(err) {
-			return db.writeDB(DBStructure{Chirps: make(map[int]Chirp), Users: make(map[string]User)})
+			return db.writeDB(DBStructure{Chirps: make(map[int]Chirp), Users: make(map[int]User), RefreshTokens: make(map[string]RefreshTokenInfo)})
 		}
 		return err
 	}
