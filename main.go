@@ -125,7 +125,21 @@ func handleChirps(secret string, db *storage.DB, w http.ResponseWriter, r *http.
 		json.NewEncoder(w).Encode(createdChirp)
 
 	case "GET":
-		chirps, err := db.GetChirps()
+		s := r.URL.Query().Get("author_id")
+		userID := 0
+		if s != "" {
+			var err error
+			userID, err = strconv.Atoi(s)
+			if err != nil {
+				http.Error(w, "Invalid author_id", http.StatusBadRequest)
+				return
+			}
+		}
+		sortOrder := r.URL.Query().Get("sort")
+		if sortOrder != "asc" && sortOrder != "desc" {
+			sortOrder = "asc"
+		}
+		chirps, err := db.GetChirps(userID, sortOrder)
 		if err != nil {
 			http.Error(w, "Failed to retrieve chirps", http.StatusInternalServerError)
 			return

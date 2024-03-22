@@ -44,15 +44,66 @@ Make sure your `.env` file includes the following variables:
 
 ## API Endpoints
 
-- **POST /api/users**: Register a new user.
-- **PUT /api/users**: Update user information (authentication required).
-- **POST /api/login**: Authenticate a user and receive access and refresh tokens.
-- **POST /api/refresh**: Refresh an access token using a refresh token.
-- **POST /api/revoke**: Revoke a refresh token.
-- **POST /api/chirps**: Create a new chirp (authentication required).
-- **GET /api/chirps**: Retrieve all chirps.
-- **GET /api/chirps/{chirpID}**: Retrieve a specific chirp (authentication required).
-- **DELETE /api/chirps/{chirpID}**: Delete a specific chirp (authentication required).
+### Chirps
+
+- **Create a Chirp**
+
+  - **POST** `/api/chirps`
+  - **Authorization required**: Yes
+  - **Body**: `{"body": "Your chirp content here"}`
+  - **Description**: Creates a new chirp with the content provided in the request body. The author is determined based on the authentication token.
+
+- **Get Chirps**
+
+  - **GET** `/api/chirps`
+  - **Authorization required**: No
+  - **Query Parameters**:
+    - `author_id` (optional): Filters the chirps to only those created by the specified user.
+    - `sort` (optional): Determines the order of the chirps returned. Can be `asc` for ascending or `desc` for descending by chirp ID. Default is `asc`.
+  - **Description**: Retrieves chirps, optionally filtered by author and sorted by ID. Without any query parameters, it returns all chirps sorted by ID in ascending order.
+  - **Examples**:
+    - Get all chirps: `GET http://localhost:8080/api/chirps`
+    - Get chirps by author 2, sorted in ascending order: `GET http://localhost:8080/api/chirps?sort=asc&author_id=2`
+    - Get chirps sorted in descending order: `GET http://localhost:8080/api/chirps?sort=desc`
+
+- **Delete a Chirp**
+  - **DELETE** `/api/chirps/{chirpID}`
+  - **Authorization required**: Yes
+  - **Description**: Deletes the chirp with the specified ID. The operation is only allowed if the authenticated user is the author of the chirp.
+
+### Authentication and Users
+
+- **Register User**
+
+  - **POST** `/api/users`
+  - **Authorization required**: No
+  - **Body**: `{"email": "user@example.com", "password": "securepassword"}`
+  - **Description**: Registers a new user with the provided email and password.
+
+- **Update User**
+
+  - **PUT** `/api/users`
+  - **Authorization required**: Yes
+  - **Body**: `{"email": "newemail@example.com", "password": "newsecurepassword"}`
+  - **Description**: Updates the authenticated user's email and password.
+
+- **Authenticate (Login)**
+
+  - **POST** `/api/login`
+  - **Authorization required**: No
+  - **Body**: `{"email": "user@example.com", "password": "securepassword"}`
+  - **Description**: Authenticates the user and returns access and refresh JWT tokens.
+
+- **Refresh Token**
+
+  - **POST** `/api/refresh`
+  - **Authorization required**: Yes (with a refresh token)
+  - **Description**: Refreshes the access token using a valid refresh token.
+
+- **Revoke Token**
+  - **POST** `/api/revoke`
+  - **Authorization required**: Yes (with a refresh token)
+  - **Description**: Revokes the refresh token, effectively logging out the session.
 
 ## Development
 

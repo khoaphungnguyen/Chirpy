@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -303,17 +304,30 @@ func (db *DB) CreateChirp(userID int, body string) (Chirp, error) {
 }
 
 // GetChirps returns all chirps in the database.
-func (db *DB) GetChirps() ([]Chirp, error) {
+func (db *DB) GetChirps(userID int, sortOrder string) ([]Chirp, error) {
 	dbStructure, err := db.loadDB()
 	if err != nil {
 		return nil, err
 	}
-	chirps := make([]Chirp, 0, len(dbStructure.Chirps))
-
+	var chirps []Chirp
 	for _, chirp := range dbStructure.Chirps {
-
-		chirps = append(chirps, chirp)
-
+		if userID > 0 {
+			if chirp.AuthorID == userID {
+				chirps = append(chirps, chirp)
+			}
+		} else {
+			chirps = append(chirps, chirp)
+		}
+	}
+	// Sort the chirps based on the sortOrder parameter
+	if sortOrder == "desc" {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].ID > chirps[j].ID
+		})
+	} else {
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].ID < chirps[j].ID
+		})
 	}
 	return chirps, nil
 }
