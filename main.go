@@ -5,9 +5,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
 	"github.com/khoaphungnguyen/Chirpy/internal/storage"
 )
 
@@ -155,17 +160,22 @@ func handleChirp(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 func handleUsers(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
-		// Decode the request body into a Chirp struct
+		// Decode the request body into a user struct
 		var newUser storage.User
 		if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		// Create a new chirp in the database
-		createdUser, err := db.CreateUser(newUser.Email)
+		// Create a new user in the database
+		createdUser, err := db.CreateUser(newUser.Email, newUser.Password)
 		if err != nil {
-			http.Error(w, "Failed to create a new user", http.StatusInternalServerError)
+			if err.Error() == "email exists" {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			} else {
+				http.Error(w, "Failed to create a new user", http.StatusInternalServerError)
+			}
+
 			return
 		}
 
@@ -178,11 +188,126 @@ func handleUsers(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type requestPayload struct {
+	Email           string `json:"email"`
+	Password        string `json:"password"`
+	ExpiresInSecond int    `json:"expireinsecond"`
+}
+
+func handleLogin(secret string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		// Decode the request body into a user struct
+		var newUser requestPayload
+		if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Create a new user in the database
+		user, err := db.Login(newUser.Email, newUser.Password, time.Duration(newUser.ExpiresInSecond))
+		if err != nil {
+			if err.Error() == "user not found" {
+				http.Error(w, "Invalid user or password!", http.StatusNotFound)
+			} else if err.Error() == "invalid credentials" {
+				http.Error(w, "Invalid user or password!", http.StatusUnauthorized)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+
+			return
+		}
+
+		// Respond with the created chirp
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(user)
+	case "PUT":
+		authHeader := r.Header.Get("Authorization")
+		tokenString := strings.Split(authHeader, " ")
+
+		// Ensure the Authorization header is correctly formatted
+		if len(tokenString) != 2 || tokenString[0] != "Bearer" {
+			http.Error(w, "Malformed token", http.StatusBadRequest)
+			return
+		}
+
+		// Decode the request body into a user struct
+		var newUser storage.User
+		if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// Parse the token
+		token, err := jwt.ParseWithClaims(tokenString[1], &jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+
+			// Return the secret signing key
+			return []byte(secret), nil
+		})
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		claims, ok := token.Claims.(*jwt.MapClaims)
+		if !ok || !token.Valid {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		userID, ok := (*claims)["sub"].(string) // The subject field in JWT is typically "sub"
+		if !ok {
+			http.Error(w, "UserID not found", http.StatusNotFound)
+			return
+		}
+
+		id, err := strconv.Atoi(userID)
+		if err != nil {
+			http.Error(w, "UserID conversion error", http.StatusBadRequest)
+			return
+		}
+
+		updatedUser, err := db.UpdateUser(id, newUser)
+		if err != nil {
+			http.Error(w, "Could not update user", http.StatusInternalServerError)
+			return
+		}
+
+		// Preparing the response
+		response := struct {
+			Email string `json:"email"`
+			ID    int    `json:"id"`
+		}{
+			Email: updatedUser.Email,
+			ID:    updatedUser.ID,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			http.Error(w, "Error encoding response", http.StatusInternalServerError)
+		}
+
+	default:
+		http.Error(w, "Onl POST, PUT methods are supported", http.StatusMethodNotAllowed)
+	}
+}
+
 func main() {
 	apiCfg := &apiConfig{}
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+	jwtSecret := os.Getenv("JWT_SECRET")
 
 	// Initialize the DB
-	db, err := storage.NewDB("./db.json")
+	db, err := storage.NewDB("./db.json", jwtSecret)
 	if err != nil {
 		log.Fatalf("Failed to initialize DB: %v", err)
 	}
@@ -211,8 +336,13 @@ func main() {
 	})
 
 	// Users handler
-	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
 		handleUsers(db, w, r)
+	})
+
+	// User Login Handler
+	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
+		handleLogin(jwtSecret, db, w, r)
 	})
 
 	// CORS middleware
