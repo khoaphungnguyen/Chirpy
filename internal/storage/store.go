@@ -26,9 +26,10 @@ type Chirp struct {
 }
 
 type User struct {
-	ID       int    `json:"id"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	ID          int    `json:"id"`
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	IsChirpyRed bool   `json:"is_chirpy_red"`
 }
 
 type RefreshTokenInfo struct {
@@ -47,13 +48,15 @@ type DBStructure struct {
 type userResponsePayload struct {
 	ID           int    `json:"id"`
 	Email        string `json:"email"`
+	IsChirpyRed  bool   `json:"is_chirpy_red"`
 	Token        string `json:"token"`
 	RefreshToken string `json:"refresh_token"`
 }
 
 type NewUserPayload struct {
-	ID    int    `json:"id"`
-	Email string `json:"email"`
+	ID          int    `json:"id"`
+	Email       string `json:"email"`
+	IsChirpyRed bool   `json:"is_chirpy_red"`
 }
 
 // NewDB creates a new database connection
@@ -96,9 +99,10 @@ func (db *DB) CreateUser(email, password string) (NewUserPayload, error) {
 	}
 
 	newUser := User{
-		ID:       newID,
-		Email:    email,
-		Password: string(hashedPassword),
+		ID:          newID,
+		Email:       email,
+		Password:    string(hashedPassword),
+		IsChirpyRed: false,
 	}
 
 	dbStructure.Users[newID] = newUser
@@ -108,8 +112,9 @@ func (db *DB) CreateUser(email, password string) (NewUserPayload, error) {
 	}
 
 	user := NewUserPayload{
-		ID:    newUser.ID,
-		Email: newUser.Email,
+		ID:          newUser.ID,
+		Email:       newUser.Email,
+		IsChirpyRed: false,
 	}
 
 	return user, nil
@@ -164,6 +169,7 @@ func (db *DB) LoginUser(email, password string) (userResponsePayload, error) {
 	payload := userResponsePayload{
 		ID:           user.ID,
 		Email:        user.Email,
+		IsChirpyRed:  user.IsChirpyRed,
 		Token:        signedAccessToken,
 		RefreshToken: signedRefreshToken,
 	}
@@ -203,6 +209,32 @@ func (db *DB) GetUserByID(id int) (User, error) {
 	}
 
 	return user, nil
+}
+
+// UpdateUser updates a user's information, excluding their email.
+func (db *DB) UpgradeUser(id int) (bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	dbStructure, err := db.loadDB()
+	if err != nil {
+		return false, err
+	}
+
+	user, exists := dbStructure.Users[id]
+	if !exists {
+		return false, errors.New("user not found")
+	}
+
+	user.IsChirpyRed = true
+
+	dbStructure.Users[id] = user
+
+	if err := db.writeDB(dbStructure); err != nil {
+		return false, err
+	}
+	return true, nil
+
 }
 
 // UpdateUser updates a user's information, excluding their email.

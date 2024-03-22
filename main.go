@@ -498,6 +498,59 @@ func handleLogin(db *storage.DB, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type webhookPayload struct {
+	Event string `json:"event"`
+	Data  struct {
+		UserID int `json:"user_id"`
+	} `json:"data"`
+}
+
+func handleWedhook(keyAPI string, db *storage.DB, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "POST":
+		// Decode the request body into a user struct
+		authHeader := r.Header.Get("Authorization")
+		tokenString := strings.Split(authHeader, " ")
+
+		// Ensure the Authorization header is correctly formatted
+		if len(tokenString) != 2 || tokenString[0] != "ApiKey" {
+			http.Error(w, "Malformed token", http.StatusUnauthorized)
+			return
+		}
+
+		if tokenString[1] != keyAPI {
+			http.Error(w, "Unthorized Access", http.StatusUnauthorized)
+			return
+		}
+
+		var payload webhookPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if payload.Event != "user.upgraded" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Upgrade the user to Chirpy Red member  in the database
+		_, err := db.UpgradeUser(payload.Data.UserID)
+		if err != nil {
+			if err.Error() == "user not found" {
+				http.Error(w, "Invalid user or password!", http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+
+	default:
+		http.Error(w, "Only POST methods are supported", http.StatusMethodNotAllowed)
+	}
+}
+
 func main() {
 	apiCfg := &apiConfig{}
 	err := godotenv.Load()
@@ -505,6 +558,7 @@ func main() {
 		log.Fatal("Error loading .env file")
 	}
 	jwtSecret := os.Getenv("JWT_SECRET")
+	webhookAPIKey := os.Getenv("WEBHOOK_API_KEY")
 
 	// Initialize the DB
 	db, err := storage.NewDB("./db.json", jwtSecret)
@@ -543,6 +597,11 @@ func main() {
 	// User Login Handler
 	mux.HandleFunc("POST /api/login", func(w http.ResponseWriter, r *http.Request) {
 		handleLogin(db, w, r)
+	})
+
+	// Webhook Handler
+	mux.HandleFunc("POST /api/polka/webhooks", func(w http.ResponseWriter, r *http.Request) {
+		handleWedhook(webhookAPIKey, db, w, r)
 	})
 
 	// Refresh token Handler
